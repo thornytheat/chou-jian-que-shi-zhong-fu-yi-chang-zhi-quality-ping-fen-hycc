@@ -70,7 +70,9 @@
         <table class="dense">
           <thead><tr><th>列</th><th>含义</th></tr></thead>
           <tbody>
-            <tr><td><code>工单号</code></td><td>WO-0001 递增，一次导出一套号</td></tr>
+            <tr><td><code>工单号 / 问题编号</code></td><td>WO-0001 递增；问题编号由「类型 + 业务键」决定，同一批数据重跑不变，可用来对账</td></tr>
+            <tr><td><code>去向 / 供应商 / 候选</code></td><td>已认领（带唯一供应商）/ 待仲裁（跨供应商争议）/ 未分配（无供应商候选）；候选列列出全部涉事供应商</td></tr>
+            <tr><td><code>本次扣分</code></td><td>该问题从总分中扣掉的分数；Σ本次扣分 = 100 − 总分</td></tr>
             <tr><td><code>row_id</code></td><td>问题行；整列问题为 <code>—</code>，整行为 <code>（整行）</code> 列</td></tr>
             <tr><td><code>column</code></td><td>问题列；整行重复为 <code>（整行）</code></td></tr>
             <tr><td><code>rules</code></td><td>同一单元格命中的全部规则（逗号/顿号分隔），已去重合并</td></tr>
@@ -82,7 +84,7 @@
       </div>
       <div class="panel-actions">
         <span class="small muted" style="align-self:center">
-          缺失违规列按「前 20 行逐行 + 其余按列汇总」输出，避免同一列的 300 行缺失把工单撑爆。
+          每个问题只出一条工单，带去向（已认领 / 待仲裁 / 未分配）、供应商、候选供应商与本次扣分；跨供应商重复组不会按行重复开单。
         </span>
       </div>
     </section>

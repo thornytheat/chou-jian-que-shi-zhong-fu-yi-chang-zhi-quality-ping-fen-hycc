@@ -96,12 +96,15 @@ def test_workorder_csv_export(client):
     assert "text/csv" in res.headers["content-type"]
     assert "attachment" in res.headers["content-disposition"]
     text = res.text
-    assert text.lstrip("\ufeff").startswith("工单号,row_id,column,rules,severity")
+    assert text.lstrip("\ufeff").startswith("工单号,问题编号,row_id,column,rules,severity,去向")
     assert "WO-0001" in text
-    # 同一单元格只出现一次：按 (row_id, column) 统计行数
+    assert "问题编号" in text and "去向" in text
+    # 同一问题（row_id + column）只出现一次
     body = [line for line in text.splitlines() if line.startswith("WO-")]
     assert len(body) >= 10
-    assert len(body) == len({line.split(",")[1] + "|" + line.split(",")[2] for line in body})
+    assert len(body) == len({line.split(",")[2] + "|" + line.split(",")[3] for line in body})
+    # 待仲裁 / 未分配在工单里有明确去向，不再混在某个供应商名下
+    assert "待仲裁" in text and "未分配" in text
 
 
 def test_weight_update_and_rescore(client):
@@ -132,6 +135,119 @@ def test_weight_validation_400(client):
     assert too_big.status_code == 400
     not_number = client.post("/api/rules/weights", json={"columns": {"price": "abc"}})
     assert not_number.status_code == 400
+
+
+def test_attribution_endpoints(client):
+    """归集视图 → 仲裁认领 → 重试同批不新增分配 → 对账通过。"""
+    run_id = client.post("/api/runs", json={"source": "sample"}).json()["run_id"]
+    poll(client, run_id)
+
+    data = client.get(f"/api/runs/{run_id}/attribution").json()
+    summary = data["summary"]
+    assert summary["total"] == summary["claimed"] + summary["pending"] + summary["unassigned"]
+    assert data["version_id"]
+    assert data["reconcile"]["ok"] is True
+    assert data["allocations"] == summary["claimed"]
+
+    pending = client.get(f"/api/runs/{run_id}/attribution?status=pending").json()
+    assert pending["items"] and all(i["status"] == "pending" for i in pending["items"])
+    dup = next(i for i in pending["items"] if i["kind"] == "duplicate_key")
+    assert len(dup["supplier_candidates"]) > 1
+    assert dup["supplier_candidates"] == sorted(dup["supplier_candidates"])
+
+    before_alloc = data["allocations"]
+    resolved = client.post(f"/api/runs/{run_id}/attribution/resolve", json={
+        "problem_id": dup["problem_id"], "decision": "claim",
+        "supplier": dup["supplier_candidates"][0], "note": "主数据归属该供应商",
+    })
+    assert resolved.status_code == 200
+    payload = resolved.json()
+    assert payload["summary"]["claimed"] == summary["claimed"] + 1
+    assert payload["summary"]["pending"] == summary["pending"] - 1
+    assert payload["allocations"] == before_alloc + 1
+    assert payload["reconcile"]["ok"] is True
+    item = payload["items"][0]
+    assert item["owner"] == dup["supplier_candidates"][0]
+    assert item["source"] == "resolution"
+    assert item["allocation_id"]
+
+    retried = client.post(f"/api/runs/{run_id}/attribution/retry").json()
+    assert retried["same_batch"] is True
+    assert retried["allocations_added"] == 0
+    assert retried["allocations_after"] == before_alloc + 1
+
+    page = client.get(f"/result/{run_id}")
+    assert page.status_code == 200
+    assert "责任归集" in page.text and "对账通过" in page.text
+    assert dup["problem_id"] in page.text
+
+
+def test_attribution_rejects_unknown_problem_and_keeps_previous_version(client):
+    run_id = client.post("/api/runs", json={"source": "sample"}).json()["run_id"]
+    poll(client, run_id)
+    before = client.get(f"/api/runs/{run_id}/attribution").json()
+
+    bad = client.post(f"/api/runs/{run_id}/attribution/resolve",
+                      json={"problem_id": "Q-NOPE", "decision": "claim", "supplier": "S01"})
+    assert bad.status_code == 400
+    after = client.get(f"/api/runs/{run_id}/attribution").json()
+    assert after["version_id"] == before["version_id"]
+    assert after["summary"] == before["summary"]
+    assert after["allocations"] == before["allocations"]
+
+    missing_supplier = client.post(f"/api/runs/{run_id}/attribution/resolve",
+                                   json={"decision": "claim"})
+    assert missing_supplier.status_code == 400
+
+
+def test_rescore_keeps_attribution_resolutions(client):
+    run_id = client.post("/api/runs", json={"source": "sample"}).json()["run_id"]
+    poll(client, run_id)
+    pending = client.get(f"/api/runs/{run_id}/attribution?status=pending").json()["items"]
+    target = pending[0]
+    client.post(f"/api/runs/{run_id}/attribution/resolve", json={
+        "problem_id": target["problem_id"], "decision": "claim",
+        "supplier": target["supplier_candidates"][0],
+    })
+    before = client.get(f"/api/runs/{run_id}/attribution").json()
+
+    client.post("/api/rules/weights", json={"columns": {"rating": 6.0}, "rule_weights": {}})
+    res = client.post(f"/api/runs/{run_id}/rescore")
+    assert res.status_code == 200
+    after = client.get(f"/api/runs/{run_id}/attribution").json()
+    assert after["summary"]["claimed"] == before["summary"]["claimed"]
+    assert after["summary"]["total"] == before["summary"]["total"]
+    assert after["reconcile"]["ok"] is True
+    client.post("/api/rules/weights/reset")
+
+
+def test_publish_failure_keeps_previous_version(client, monkeypatch):
+    """归集写入失败时：接口 409，上一版总分 / 供应商结果 / 工单仍可用。"""
+    from app import store
+
+    run_id = client.post("/api/runs", json={"source": "sample"}).json()["run_id"]
+    poll(client, run_id)
+    before = client.get(f"/api/runs/{run_id}/attribution").json()
+    csv_before = client.get(f"/api/runs/{run_id}/alerts.csv").text
+
+    def boom(*args, **kwargs):
+        raise store.StoreError("模拟写入失败")
+
+    monkeypatch.setattr(store, "publish_attribution", boom)
+    res = client.post(f"/api/runs/{run_id}/attribution/retry")
+    assert res.status_code == 409
+    assert "保留上一版" in res.json()["detail"]
+
+    after = client.get(f"/api/runs/{run_id}/attribution").json()
+    assert after["version_id"] == before["version_id"]
+    assert after["summary"] == before["summary"]
+    assert after["allocations"] == before["allocations"]
+    assert client.get(f"/result/{run_id}").status_code == 200
+    assert client.get(f"/api/runs/{run_id}/alerts.csv").text == csv_before
+    versions = store.list_attributions(run_id)
+    assert any(v["state"] == "rejected" for v in versions)
+    active = [v for v in versions if v["state"] == "active"]
+    assert [v["version_id"] for v in active] == [before["version_id"]]
 
 
 def test_end_to_end_upload_flow(client):

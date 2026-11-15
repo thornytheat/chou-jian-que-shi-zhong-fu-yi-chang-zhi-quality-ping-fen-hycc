@@ -160,7 +160,7 @@
       </div>
       <div class="panel-actions">
         <span class="small muted" style="align-self:center">
-          载入 → 缺失 → 重复 → 异常 → 类型与范围校验 → 加权评分 → 告警合并；每步都是纯函数，同一输入同一分数。
+          载入 → 缺失 → 重复 → 异常 → 类型与范围校验 → 加权评分 → 责任归集与对账 → 告警合并；每步都是纯函数，同一输入同一分数。
         </span>
       </div>
     </section>
@@ -267,7 +267,7 @@
       </div>
       <div class="panel-actions">
         <span class="small muted" style="align-self:center">
-          整改工单 CSV 字段：工单号 / row_id / column / rules / severity / 当前值 / 问题说明 / 整改建议；缺失违规按前 20 行逐行 + 其余按列汇总。
+          整改工单 CSV 字段：工单号 / 问题编号 / row_id / column / rules / severity / 去向 / 供应商 / 候选 / 本次扣分 / 当前值 / 问题说明 / 整改建议；一个问题只出现一行。
         </span>
       </div>
     </section>

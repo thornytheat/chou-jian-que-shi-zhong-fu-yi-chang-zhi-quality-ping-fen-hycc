@@ -1,13 +1,16 @@
-"""剖析流水线：把 6 个业务模块串成一次可复现的运行。
+"""剖析流水线：把业务模块串成一次可复现的运行。
 
-顺序固定（缺失 → 重复 → 异常 → 类型/范围 → 评分 → 告警），每一步都写入阶段耗时，
-便于结果页展示「依据来自哪一步」。纯函数，无 IO，可直接单测。
+顺序固定（缺失 → 重复 → 异常 → 类型/范围 → 评分 → 责任归集 → 告警），每一步都写入
+阶段耗时，便于结果页展示「依据来自哪一步」。纯函数，无 IO，可直接单测。
+
+责任归集阶段（``attribution``）先于告警：账本是唯一事实来源，告警只是账本的投影。
+同一问题在账本中只有一条，重复组按「组」计一次，跨供应商重复不会按行重复处罚。
 """
 from __future__ import annotations
 
 import time
 
-from . import alerts, duplicates, missing, outliers, score, validators
+from . import alerts, attribution, duplicates, missing, outliers, score, validators
 from .loader import missing_tokens
 
 STAGES = [
@@ -17,12 +20,14 @@ STAGES = [
     ("outliers", "异常值检测（IQR + 稳健z）"),
     ("validation", "类型与范围校验"),
     ("score", "加权评分"),
+    ("attribution", "责任归集与对账"),
     ("alerts", "告警合并去重"),
 ]
 
 
 def run(rows: list[dict[str, str]], columns: list[str], rules: dict,
-        weights: dict | None = None, progress=None) -> dict:
+        weights: dict | None = None, progress=None,
+        resolutions: dict | None = None) -> dict:
     stages: list[dict] = []
     started = time.perf_counter()
 
@@ -61,8 +66,17 @@ def run(rows: list[dict[str, str]], columns: list[str], rules: dict,
     close(5)
 
     step(6)
-    alert_result = alerts.build(missing_result, dup_result, outlier_result, validation)
+    ledger = attribution.build(rows, columns, rules, missing_result, dup_result,
+                               outlier_result, validation)
+    ledger = attribution.attach_penalties(ledger, scored)
+    ledger["resolutions"] = dict(resolutions or {})
+    ledger = attribution.finalize(ledger)
+    reconcile = attribution.reconcile(ledger)
     close(6)
+
+    step(7)
+    alert_result = alerts.build(ledger)
+    close(7)
 
     report = {
         "dataset": {
@@ -79,6 +93,9 @@ def run(rows: list[dict[str, str]], columns: list[str], rules: dict,
         "validation": validation,
         "score": scored,
         "alerts": alert_result,
+        "attribution": ledger,
+        "reconcile": reconcile,
+        "resolutions": dict(resolutions or {}),
         "stages": stages,
         "elapsed_ms": round((time.perf_counter() - started) * 1000, 2),
         "rules_snapshot": _rules_snapshot(rules),

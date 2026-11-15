@@ -44,6 +44,11 @@
     <div class="k-value">{{ stats.duplicate_groups if stats and stats.duplicate_groups is not none else '—' }}</div>
     <div class="k-note">复合键重复组 · 整行重复 {{ stats.row_groups if stats else '—' }} 组</div>
   </div>
+  <div class="kpi {% if stats and stats.pending %}warn{% elif stats and stats.problems is not none %}ok{% endif %}">
+    <div class="k-label">责任去向（最近一次）</div>
+    <div class="k-value">{% if stats and stats.claimed is not none %}{{ stats.claimed }}<span class="small muted">/{{ stats.problems }}</span>{% else %}—{% endif %}</div>
+    <div class="k-note">待仲裁 {{ stats.pending if stats and stats.pending is not none else '—' }} · 未分配 {{ stats.unassigned if stats and stats.unassigned is not none else '—' }}</div>
+  </div>
   <div class="kpi">
     <div class="k-label">运行数</div>
     <div class="k-value">{{ stats.runs if stats else history|length }}</div>
@@ -74,7 +79,7 @@
         </p>
         <ol class="list small" style="margin-bottom:0">
           <li>工作台选「内置样例」或上传自己的 CSV（列名必须与规则集一致）。</li>
-          <li>点「执行剖析」：7 个阶段实时推进，完成自动跳结果页。</li>
+          <li>点「执行剖析」：8 个阶段实时推进，完成自动跳结果页。</li>
           <li>结果页看总分与分级、每列违规率、分级依据与告警工单。</li>
           <li>复核页改权重 → 用新权重重算 → 下载整改工单 CSV 下发上游。</li>
         </ol>
@@ -95,14 +100,14 @@
       </p>
       <p class="small">
         <strong>系统替代哪一段</strong>：把抽检 CSV 交给规则集，自动算缺失率、业务键/整行重复、按品类分组的双法异常值，
-        给出百分制分数与 A/B/C/D 分级，并把同一单元格的多条命中合并成一张整改工单，CSV 下发。
+        给出百分制分数与 A/B/C/D 分级；每个问题只计一次，再按供应商归集去向（已认领 / 待仲裁 / 未分配），CSV 下发。
       </p>
 
       <h3>演示步骤（每步都真实可点）</h3>
       <ol class="list small">
         <li>打开 <a href="/workbench">抽检工作台</a>：直接选「内置样例 quality_sample.csv」或上传自己的 CSV（9 列 2000 行）。</li>
-        <li>点「执行剖析」：页面按 7 个阶段显示进度（载入 → 缺失 → 重复 → 异常 → 校验 → 评分 → 告警），完成后自动跳到结果页。</li>
-        <li>结果页看：总分与分级、每列违规率表、high/medium 告警（同一单元格只出现一条，<code>rules[]</code> 保留全部命中规则）、样本不足品类说明。</li>
+        <li>点「执行剖析」：页面按 8 个阶段显示进度（载入 → 缺失 → 重复 → 异常 → 校验 → 评分 → 责任归集 → 告警），完成后自动跳到结果页。</li>
+        <li>结果页看：总分与分级、每列违规率表、责任归集（已认领 / 待仲裁 / 未分配，每个问题只计一次）、样本不足品类说明。</li>
         <li>去 <a href="/review">复核与工单</a>：改权重 → 用新权重重算 → 体会分数变化；下载工单 CSV（row_id / column / rules / severity / 建议）。</li>
         <li>故意制造错误：上传一份缺列 CSV（例如删掉 price 列），接口返回 400 与中文原因，页面可恢复重试。</li>
       </ol>
@@ -169,11 +174,12 @@
           <thead><tr><th>模块</th><th>实现</th><th>页面落点</th></tr></thead>
           <tbody>
             <tr><td>1. 规则集</td><td><code>loader.py</code> + <code>sample_data/rules.json</code></td><td>侧栏锚点 1，工作台「列规则与权重」</td></tr>
-            <tr><td>2. 数据剖析</td><td><code>pipeline.py</code>（7 阶段纯函数）</td><td>侧栏锚点 2，工作台「剖析进度」</td></tr>
+            <tr><td>2. 数据剖析</td><td><code>pipeline.py</code>（8 阶段纯函数）</td><td>侧栏锚点 2，工作台「剖析进度」</td></tr>
             <tr><td>3. 重复检测</td><td><code>duplicates.py</code></td><td>侧栏锚点 3，工作台「重复检测」，结果页「缺失与重复」</td></tr>
             <tr><td>4. 异常检测</td><td><code>outliers.py</code>（IQR + 稳健 z）</td><td>侧栏锚点 4，工作台「异常检测」，结果页「异常值」</td></tr>
             <tr><td>5. 评分卡</td><td><code>score.py</code>（违规率 → 权重归一）</td><td>侧栏锚点 5，结果页「评分卡」分段</td></tr>
-            <tr><td>6. 工单导出</td><td><code>alerts.py</code> + <code>export.py</code></td><td>侧栏锚点 6，结果页「告警」分段与复核页导出</td></tr>
+            <tr><td>6. 工单导出</td><td><code>alerts.py</code> + <code>export.py</code></td><td>侧栏锚点 6，结果页「告警与工单」分段与复核页导出</td></tr>
+            <tr><td>7. 责任归集</td><td><code>attribution.py</code> + <code>store.py</code></td><td>结果页「责任归集」总览：三桶去向、供应商结果、对账与原子切换</td></tr>
           </tbody>
         </table>
       </div>
@@ -249,7 +255,7 @@
             <tr>
               <td>工单</td>
               <td>同一 (row_id, column)</td>
-              <td class="small">只出一条告警，<code>rules[]</code> 保留全部命中规则；缺失违规按「前 20 行逐行 + 其余按列汇总」输出</td>
+              <td class="small">只出一条告警，<code>rules[]</code> 保留全部命中规则；重复组按「组」计一条，跨供应商时挂起待仲裁</td>
             </tr>
           </tbody>
         </table>

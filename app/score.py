@@ -6,6 +6,11 @@
 - 总分 = 100 × Σ(score × weight) / Σweight，四舍五入到 2 位。
 - 分级：A ≥ 90 / B ≥ 80 / C ≥ 70 / D < 70（阈值来自 rules.grade_thresholds）。
 - 整行重复属于行级规则，不计入某一列，用「（整行）」这一伪列承载，权重取规则权重。
+- 复合键重复属于组级规则，同样用「（业务键）」这一伪列承载，**只计一个评分单元**：
+  同一重复组可能同时涉及 product_id、category 等多个键列，若按列各算一次会把同一个
+  问题重复扣分；组内跨供应商时也不按行拆分，避免把同一组的责任重复落到每一行。
+- 每个评分单元额外输出 ``deduction``（该单元对总分的扣减），供责任归集按问题分摊，
+  Σdeduction 与 100 − total 对账。
 """
 from __future__ import annotations
 
@@ -20,6 +25,8 @@ RULE_LABELS = {
 
 ROW_UNIT = "__row__"
 ROW_UNIT_LABEL = "（整行）"
+KEY_UNIT = "__key__"
+KEY_UNIT_LABEL = "（业务键）"
 
 
 def clamp01(value: float) -> float:
@@ -98,15 +105,7 @@ def build_units(missing: dict, duplicates: dict, outliers: dict, validation: dic
                 "violations": len(col.get("cells", [])),
                 "note": "" if col.get("evaluated_sample") else "无足够样本，按满分",
             })
-        if "duplicate_key" in active:
-            dup = duplicates["duplicate_key"]
-            units.append({
-                "column": column,
-                "rule": "duplicate_key",
-                "samples": total_rows - duplicates["excluded_from_key"],
-                "violations": dup["extra_rows"],
-                "note": _dup_note(dup, "复合业务键"),
-            })
+        # duplicate_key 是组级规则，循环外统一生成一个（业务键）单元
 
     dup_row = duplicates["duplicate_row"]
     units.append({
@@ -116,6 +115,15 @@ def build_units(missing: dict, duplicates: dict, outliers: dict, validation: dic
         "violations": dup_row["extra_rows"],
         "note": _dup_note(dup_row, "整行"),
     })
+    dup_key = duplicates["duplicate_key"]
+    if any("duplicate_key" in spec.get("rules", []) for spec in rules["columns"].values()):
+        units.append({
+            "column": KEY_UNIT,
+            "rule": "duplicate_key",
+            "samples": total_rows - duplicates.get("excluded_from_key", 0),
+            "violations": dup_key["extra_rows"],
+            "note": _dup_note(dup_key, "复合业务键"),
+        })
     return units
 
 
@@ -140,7 +148,7 @@ def compute(units: list[dict], rules: dict, weights: dict | None = None,
             rate = violations / samples
             score = clamp01(1.0 - rate)
             note = unit.get("note") or ""
-        col_weight = 1.0 if unit["column"] == ROW_UNIT else columns.get(unit["column"], 1.0)
+        col_weight = 1.0 if unit["column"] in (ROW_UNIT, KEY_UNIT) else columns.get(unit["column"], 1.0)
         weight = col_weight * rules_w.get(unit["rule"], 1.0)
         items.append({
             "column": unit["column"],
@@ -162,6 +170,11 @@ def compute(units: list[dict], rules: dict, weights: dict | None = None,
 
     total = 0.0 if weight_sum <= 0 else 100.0 * weighted / weight_sum
     total = round(total, 2)
+    # 每个单元对总分的扣减：权重 × (1 − score) / Σ权重 × 100；Σdeduction ≈ 100 − total
+    for item in items:
+        item["deduction"] = round(
+            100.0 * item["weight"] * (1.0 - item["score"]) / weight_sum, 6
+        ) if weight_sum > 0 else 0.0
     return {
         "items": items,
         "weight_sum": round(weight_sum, 4),
@@ -171,11 +184,16 @@ def compute(units: list[dict], rules: dict, weights: dict | None = None,
         "thresholds": rules.get("grade_thresholds") or {"A": 90, "B": 80, "C": 70},
         "notes": notes,
         "weights_used": {"columns": columns, "rule_weights": rules_w},
+        "deduction_total": round(100.0 - total, 6),
     }
 
 
 def label_of(column: str) -> str:
-    return ROW_UNIT_LABEL if column == ROW_UNIT else column
+    if column == ROW_UNIT:
+        return ROW_UNIT_LABEL
+    if column == KEY_UNIT:
+        return KEY_UNIT_LABEL
+    return column
 
 
 def _missing_note(item: dict) -> str:

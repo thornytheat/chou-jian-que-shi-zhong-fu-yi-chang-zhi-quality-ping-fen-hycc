@@ -148,6 +148,74 @@
     });
   }
 
+  // ---------- 结果页：责任归集（筛选 / 认领 / 重试同批） ----------
+  (function attributionTools() {
+    var table = qs('#attribution-table');
+    if (!table) return;
+    var msg = qs('#attribution-msg');
+    function note(text, cls) {
+      if (!msg) { window.alert(text); return; }
+      msg.hidden = false;
+      msg.className = 'alert ' + (cls || 'alert-info');
+      msg.textContent = text;
+    }
+
+    qsa('#attribution-filter [data-status]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        qsa('#attribution-filter [data-status]').forEach(function (b) { b.classList.remove('active'); });
+        btn.classList.add('active');
+        var want = btn.getAttribute('data-status');
+        qsa('tbody tr[data-status]', table).forEach(function (tr) {
+          tr.hidden = want !== 'all' && tr.getAttribute('data-status') !== want;
+        });
+      });
+    });
+
+    qsa('form.attribution-form', table).forEach(function (form) {
+      form.addEventListener('submit', function (ev) {
+        ev.preventDefault();
+        var supplierInput = qs('select[name="supplier"]', form);
+        var supplier = supplierInput ? supplierInput.value : '';
+        if (!supplier) { note('请先选择供应商再提交认领。', 'alert-error'); return; }
+        var noteInput = qs('input[name="note"]', form);
+        var button = qs('button[type="submit"]', form);
+        if (button) button.disabled = true;
+        window.postJSON('/api/runs/' + form.getAttribute('data-run') + '/attribution/resolve', {
+          problem_id: form.getAttribute('data-problem'),
+          decision: 'claim',
+          supplier: supplier,
+          note: noteInput ? noteInput.value : ''
+        }).then(function (data) {
+          var summary = data.summary || {};
+          note('已提交并通过对账：已认领 ' + (summary.claimed || 0) + ' · 待仲裁 ' +
+            (summary.pending || 0) + ' · 未分配 ' + (summary.unassigned || 0) +
+            '。分配流水 ' + data.allocations + ' 条，正在刷新页面…', 'alert-info');
+          window.setTimeout(function () { window.location.reload(); }, 700);
+        }).catch(function (err) {
+          if (button) button.disabled = false;
+          note('仲裁未生效（上一版仍可用）：' + err.message, 'alert-error');
+        });
+      });
+    });
+
+    var retry = qs('#attribution-retry');
+    if (retry) {
+      retry.addEventListener('click', function () {
+        retry.disabled = true;
+        window.postJSON('/api/runs/' + retry.getAttribute('data-run') + '/attribution/retry', {})
+          .then(function (data) {
+            retry.disabled = false;
+            note('重试完成：批次' + (data.same_batch ? '一致' : '已更新') +
+              '，新增分配 ' + data.allocations_added + ' 条（当前 ' + data.allocations_after + ' 条）。', 'alert-info');
+          })
+          .catch(function (err) {
+            retry.disabled = false;
+            note('重试未生效（上一版仍可用）：' + err.message, 'alert-error');
+          });
+      });
+    }
+  })();
+
   // ---------- 复核页：权重保存 / 恢复默认 / 重算 ----------
   function weightMsg(message, cls) {
     var box = qs('#weight-msg');

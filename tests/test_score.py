@@ -115,10 +115,14 @@ def test_build_units_from_modules_and_labels(dataset, rules):
     val = validators.analyze(dataset["rows"], dataset["columns"], rules, tokens)
     units = score.build_units(miss, dup, out, val, rules)
     result = score.compute(units, rules)
-    # 每个启用规则都有评分单元，且整行重复用「（整行）」伪列承载
+    # 每个启用规则都有评分单元；重复规则用伪列承载且各计一次：
+    # 复合键重复不再按 product_id/category 各算一单元，整行重复用「（整行）」
     rules_count = sum(len(spec.get("rules", [])) for spec in rules["columns"].values())
-    assert len(units) == rules_count + 1
+    assert len(units) == rules_count                   # 每个键列单元被（业务键）替换
     assert any(u["column"] == score.ROW_UNIT for u in units)
+    assert any(u["column"] == score.KEY_UNIT for u in units)
+    assert sum(1 for u in units if u["rule"] == "duplicate_key") == 1
+    assert sum(1 for u in units if u["rule"] == "duplicate_row") == 1
     assert 0 < result["total"] <= 100
     assert result["grade"] in {"A", "B", "C", "D"}
     allowed_item = next(i for i in result["items"]
@@ -128,3 +132,39 @@ def test_build_units_from_modules_and_labels(dataset, rules):
     rating_missing = next(i for i in result["items"]
                           if i["column"] == "rating" and i["rule"] == "missing")
     assert rating_missing["score_pct"] == 0.0       # 全空列 0 分
+    # 扣分合计与总分互补，供责任归集对账
+    assert abs(sum(i["deduction"] for i in result["items"]) - (100 - result["total"])) <= 0.011
+
+
+def test_duplicate_key_is_scored_once_with_key_unit():
+    """跨供应商重复组只扣一次：两个键列不再各自生成评分单元。"""
+    duplicates = {
+        "business_key": ["product_id", "category"],
+        "duplicate_key": {"columns": ["product_id", "category"],
+                          "groups": [{"key": {"product_id": "P1", "category": "c"},
+                                      "count": 3, "extra": 2,
+                                      "row_ids": ["R1", "R2", "R3"], "label": "业务键"}],
+                          "group_count": 1, "row_count": 3, "extra_rows": 2,
+                          "row_ids": ["R1", "R2", "R3"]},
+        "duplicate_row": {"columns": [], "groups": [], "group_count": 0,
+                          "row_count": 0, "extra_rows": 0, "row_ids": []},
+        "excluded_from_key": 0,
+    }
+    missing = {"total_rows": 10, "columns": []}
+    outliers = {"cells": [], "insufficient": []}
+    validation = {"range": {"cells": [], "count": 0}, "type": {"cells": [], "count": 0}}
+    rules = {
+        "grade_thresholds": {"A": 90, "B": 80, "C": 70},
+        "rule_weights": {"duplicate_key": 1.0},
+        "columns": {
+            "product_id": {"weight": 1.0, "rules": ["duplicate_key"]},
+            "category": {"weight": 1.0, "rules": ["duplicate_key"]},
+        },
+    }
+    units = score.build_units(missing, duplicates, outliers, validation, rules)
+    key_units = [u for u in units if u["rule"] == "duplicate_key"]
+    assert len(key_units) == 1 and key_units[0]["column"] == score.KEY_UNIT
+    result = score.compute(units, rules)
+    key_item = next(i for i in result["items"] if i["rule"] == "duplicate_key")
+    assert key_item["violations"] == 2
+    assert key_item["column_label"] == score.KEY_UNIT_LABEL
